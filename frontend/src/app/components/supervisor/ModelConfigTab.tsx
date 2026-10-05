@@ -7,7 +7,7 @@ import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tool
 import { getSystemSettings, updateSystemSettings, getAvailableModels, getMetrics } from "@/app/api";
 
 export function ModelConfigTab() {
-  const [llmModel, setLlmModel]             = useState("llama-3.1-8b-instant");
+  const [llmModel, setLlmModel]             = useState("openai/gpt-oss-20b");
   const [embeddingModel, setEmbeddingModel] = useState("all-MiniLM-L6-v2");
   const [availableModels, setAvailableModels] = useState<any[]>([]);
   const [saving, setSaving]   = useState(false);

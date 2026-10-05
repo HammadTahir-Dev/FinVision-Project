@@ -28,7 +28,7 @@ router   = APIRouter(prefix="/supervisor", tags=["Supervisor"])
 BACKUP_DIR = "./backups"
 
 AVAILABLE_MODELS = [
-    {"id": "llama-3.1-8b-instant",            "name": "LLaMA 3.1 8B Instant",       "context": 128000, "speed": "fastest"},
+    {"id": "openai/gpt-oss-20b",            "name": "LLaMA 3.1 8B Instant",       "context": 128000, "speed": "fastest"},
     {"id": "llama-3.1-70b-versatile",         "name": "LLaMA 3.1 70B Versatile",    "context": 128000, "speed": "fast"},
     {"id": "llama-3.3-70b-versatile",         "name": "LLaMA 3.3 70B Versatile",    "context": 128000, "speed": "fast"},
     {"id": "llama3-groq-70b-8192-tool-use-preview", "name": "LLaMA 3 70B Tool Use", "context": 8192,   "speed": "medium"},

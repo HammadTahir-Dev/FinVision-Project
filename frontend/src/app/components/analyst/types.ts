@@ -57,7 +57,7 @@ export function defaultSettings(user: AuthUser | null): AppSettings {
     accentColor: "#F59E0B",
     fontSize: "medium",
     density: "comfortable",
-    defaultModel: "llama-3.1-8b-instant",
+    defaultModel: "openai/gpt-oss-20b",
     responseStyle: "balanced",
     citationsEnabled: true,
     streamingEnabled: true,

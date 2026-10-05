@@ -32,7 +32,7 @@ export function AIPrefsTab({ settings, onChange }: Props) {
           <select value={settings.defaultModel} onChange={e => onChange({ defaultModel:e.target.value })} style={{ ...inp, cursor:"pointer" }}>
             {availableModels.length > 0
               ? availableModels.map(m => <option key={m.id} value={m.id}>{m.name}</option>)
-              : ["llama-3.1-8b-instant","llama-3.1-70b-versatile","gemma2-9b-it"].map(m => <option key={m}>{m}</option>)}
+              : ["openai/gpt-oss-20b","llama-3.1-70b-versatile","gemma2-9b-it"].map(m => <option key={m}>{m}</option>)}
           </select>
           <p style={{ fontSize:"0.7rem", color:"#94A3B8", marginTop:4 }}>Updates the active model for all AI queries system-wide.</p>
         </div>

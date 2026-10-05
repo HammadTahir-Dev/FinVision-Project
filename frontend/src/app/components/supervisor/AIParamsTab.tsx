@@ -14,7 +14,7 @@ export function AIParamsTab() {
   const [topP, setTopP]               = useState(0.90);
   const [freqPenalty, setFreqPenalty] = useState(0.20);
   const [activePreset, setActivePreset] = useState<string|null>("balanced");
-  const [llmModel, setLlmModel]       = useState("llama-3.1-8b-instant");
+  const [llmModel, setLlmModel]       = useState("openai/gpt-oss-20b");
   const [saving, setSaving]           = useState(false);
   const [saved, setSaved]             = useState(false);
   const [error, setError]             = useState("");

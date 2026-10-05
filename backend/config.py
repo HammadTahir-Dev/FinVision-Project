@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     chroma_dir: str = "./chroma_db"
 
     # ── LLM / RAG Settings (editable by Supervisor) ───────────────────────────
-    default_llm_model: str = "llama-3.1-8b-instant"
+    default_llm_model: str = "openai/gpt-oss-20b"
     default_embedding_model: str = "all-MiniLM-L6-v2"
     default_temperature: float = 0.35
     default_max_tokens: int = 2048
