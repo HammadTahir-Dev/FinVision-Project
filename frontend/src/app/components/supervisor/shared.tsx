@@ -3,7 +3,7 @@
  */
 import { Info, AlertTriangle, CheckCircle, XCircle } from "lucide-react";
 
-export type Tab = "model" | "ai-params" | "system";
+export type Tab = "model" | "ai-params" | "system" | "plans";
 
 export const PRESETS = {
   precise:  { temperature: 0.10, max_tokens: 4096, chunk_size: 256,  k_value: 10, top_p: 0.85, freq_penalty: 0.10 },

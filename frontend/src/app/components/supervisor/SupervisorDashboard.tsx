@@ -3,7 +3,7 @@
  * Imports the 3 tab components and shared types.
  */
 import { useState } from "react";
-import { Settings, Database, LogOut, Bell, Cpu, Shield, ChevronRight } from "lucide-react";
+import { Settings, Database, LogOut, Bell, Cpu, Shield, ChevronRight, CreditCard } from "lucide-react";
 import type { AuthUser } from "@/app/auth";
 import finvisionLogo from "@/imports/Gemini_Generated_Image_zcm87kzcm87kzcm8__1_-Photoroom.png";
 import { ImageWithFallback } from "@/app/components/figma/ImageWithFallback";
@@ -11,6 +11,7 @@ import type { Tab } from "./shared";
 import { ModelConfigTab }   from "./ModelConfigTab";
 import { AIParamsTab }      from "./AIParamsTab";
 import { SystemMonitorTab } from "./SystemMonitorTab";
+import { PlansTab }         from "./PlansTab";
 
 interface Props { onLogout: () => void; user: AuthUser | null; }
 
@@ -23,19 +24,21 @@ export function SupervisorDashboard({ onLogout, user }: Props) {
     { id:"model"     as Tab, icon:Cpu,      label:"Model Config",   desc:"LLM & Embedding" },
     { id:"ai-params" as Tab, icon:Settings, label:"AI Parameters",  desc:"RAG & Inference" },
     { id:"system"    as Tab, icon:Database, label:"System Monitor", desc:"DB & Backup" },
+    { id:"plans"     as Tab, icon:CreditCard, label:"Plans & Pricing", desc:"Subscriptions" },
   ];
 
   const headerTitles: Record<Tab,{title:string;sub:string}> = {
     "model":     { title:"Model Configuration",  sub:"Manage LLM models — changes apply instantly to all queries" },
     "ai-params": { title:"AI / RAG Parameters",  sub:"Fine-tune inference and retrieval — saved to database" },
     "system":    { title:"System Monitoring",     sub:"Real-time database health, audit logs and backup management" },
+    "plans":     { title:"Plans & Pricing",       sub:"Edit subscription prices, limits and features — changes apply instantly" },
   };
 
   return (
-    <div style={{ display:"grid", gridTemplateColumns:"220px 1fr", height:"100vh", background:"#F4F6FB", fontFamily:"Inter,sans-serif" }}>
+    <div style={{ display:"grid", gridTemplateColumns:"220px 1fr", gridTemplateRows:"100vh", height:"100vh", overflow:"hidden", background:"#F4F6FB", fontFamily:"Inter,sans-serif" }}>
 
       {/* ── Sidebar ── */}
-      <div style={{ background:"#0D1B3E", display:"flex", flexDirection:"column", height:"100vh", position:"sticky", top:0 }}>
+      <div style={{ background:"#0D1B3E", display:"flex", flexDirection:"column", height:"100vh", minHeight:0, overflow:"hidden" }}>
 
         {/* Logo */}
         <div style={{ padding:"20px 16px 14px", borderBottom:"1px solid rgba(255,255,255,0.08)" }}>
@@ -61,7 +64,7 @@ export function SupervisorDashboard({ onLogout, user }: Props) {
         </div>
 
         {/* Nav */}
-        <nav style={{ flex:1, padding:"16px 12px" }}>
+        <nav className="fv-side-nav" style={{ flex:1, minHeight:0, overflowY:"auto", scrollbarWidth:"none", padding:"16px 12px" }}>
           <p style={{ color:"rgba(255,255,255,0.3)", fontSize:"0.62rem", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.1em", marginBottom:8, paddingLeft:8 }}>Control Center</p>
           <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
             {NAV_TABS.map(tab => {
@@ -95,7 +98,7 @@ export function SupervisorDashboard({ onLogout, user }: Props) {
       </div>
 
       {/* ── Main content ── */}
-      <div style={{ display:"flex", flexDirection:"column", height:"100vh", overflow:"hidden" }}>
+      <div style={{ display:"flex", flexDirection:"column", height:"100vh", minHeight:0, minWidth:0, overflow:"hidden" }}>
 
         {/* Header */}
         <div style={{ background:"#fff", borderBottom:"1px solid #E8EAF0", padding:"0 28px", height:62, display:"flex", alignItems:"center", justifyContent:"space-between", flexShrink:0 }}>
@@ -115,10 +118,11 @@ export function SupervisorDashboard({ onLogout, user }: Props) {
         </div>
 
         {/* Tab content */}
-        <div style={{ flex:1, overflowY:"auto", scrollbarWidth:"none" }}>
+        <div style={{ flex:1, minHeight:0, overflowY:"auto", scrollbarWidth:"none" }}>
           {activeTab === "model"     && <ModelConfigTab/>}
           {activeTab === "ai-params" && <AIParamsTab/>}
           {activeTab === "system"    && <SystemMonitorTab/>}
+          {activeTab === "plans"     && <PlansTab/>}
         </div>
       </div>
     </div>

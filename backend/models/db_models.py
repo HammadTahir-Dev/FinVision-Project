@@ -11,11 +11,14 @@ Tables:
   - system_settings    → supervisor-controlled RAG/LLM config
   - system_logs        → audit trail of all system events
   - backup_records     → database backup history
+  - subscription_plans → plans & prices (editable by the supervisor)
+  - subscriptions      → each user's current plan
+  - payments           → billing history / invoices
 """
 
 from sqlalchemy import (
     Column, Integer, String, Float, Boolean, Text,
-    DateTime, ForeignKey, Enum, JSON,
+    DateTime, ForeignKey, Enum, JSON, UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -130,6 +133,7 @@ class ChatMessage(Base):
     role       = Column(String(20), nullable=False)   # "user" or "assistant"
     content    = Column(Text, nullable=False)
     citations  = Column(JSON, nullable=True)          # list of citation dicts
+    chart      = Column(JSON, nullable=True)          # chart spec drawn under the answer
     latency_ms = Column(Integer, nullable=True)       # response time in ms
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -219,3 +223,74 @@ class BackupRecord(Base):
     created_at  = Column(DateTime(timezone=True), server_default=func.now())
     completed_at= Column(DateTime(timezone=True), nullable=True)
     error_msg   = Column(Text, nullable=True)
+
+
+# ── Subscription Plans (editable by the supervisor) ──────────────────────────
+
+class SubscriptionPlan(Base):
+    __tablename__ = "subscription_plans"
+
+    id            = Column(Integer, primary_key=True, index=True)
+    code          = Column(String(40), unique=True, nullable=False)    # free, pro, business
+    name          = Column(String(80), nullable=False)
+    tagline       = Column(String(255), nullable=True)
+    price_monthly = Column(Float, default=0.0, nullable=False)
+    price_yearly  = Column(Float, default=0.0, nullable=False)
+    currency      = Column(String(8), default="USD", nullable=False)
+    # Monthly limits; -1 means unlimited. Keys: uploads, chat_queries, forecasts, reports, max_file_mb
+    limits        = Column(JSON, nullable=False, default=dict)
+    features      = Column(JSON, nullable=False, default=list)          # bullet points shown on the card
+    is_default    = Column(Boolean, default=False)                       # plan new users start on
+    is_active     = Column(Boolean, default=True)                        # hidden from users when False
+    highlighted   = Column(Boolean, default=False)                       # "Most popular" badge
+    sort_order    = Column(Integer, default=0)
+    created_at    = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at    = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class Subscription(Base):
+    __tablename__ = "subscriptions"
+
+    id                   = Column(Integer, primary_key=True, index=True)
+    user_id              = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False)
+    plan_id              = Column(Integer, ForeignKey("subscription_plans.id"), nullable=False)
+    billing_cycle        = Column(String(10), default="monthly")        # monthly | yearly
+    status               = Column(String(20), default="active")          # active | canceled
+    current_period_start = Column(DateTime(timezone=True), nullable=False)
+    current_period_end   = Column(DateTime(timezone=True), nullable=True)  # None for free plans
+    cancel_at_period_end = Column(Boolean, default=False)
+    created_at           = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at           = Column(DateTime(timezone=True), onupdate=func.now())
+
+    plan = relationship("SubscriptionPlan")
+
+
+class Payment(Base):
+    __tablename__ = "payments"
+
+    id            = Column(Integer, primary_key=True, index=True)
+    user_id       = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    plan_code     = Column(String(40), nullable=False)
+    plan_name     = Column(String(80), nullable=False)
+    billing_cycle = Column(String(10), nullable=False)
+    amount        = Column(Float, nullable=False)
+    currency      = Column(String(8), nullable=False)
+    status        = Column(String(20), default="paid")     # paid | failed | refunded
+    provider      = Column(String(30), default="demo")     # demo until a real gateway is connected
+    reference     = Column(String(80), nullable=False)     # invoice number
+    period_start  = Column(DateTime(timezone=True), nullable=True)
+    period_end    = Column(DateTime(timezone=True), nullable=True)
+    created_at    = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class UsageCounter(Base):
+    """How much of each limited feature a user has used in a calendar month.
+    Kept separately so deleting chats/files/reports doesn't reset usage."""
+    __tablename__ = "usage_counters"
+    __table_args__ = (UniqueConstraint("user_id", "period", "metric", name="uq_usage_user_period_metric"),)
+
+    id      = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    period  = Column(String(7), nullable=False)      # "2026-11"
+    metric  = Column(String(30), nullable=False)     # uploads | chat_queries | forecasts | reports
+    count   = Column(Integer, default=0, nullable=False)

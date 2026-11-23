@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 import os
+import re
 import uuid
 import logging
 
@@ -22,13 +23,14 @@ from database import get_db
 from config import get_settings
 from models.db_models import UploadedFile, FileStatus, FileType, User, SystemLog, LogLevel
 from routers.auth import get_current_user, log_event
+from services.billing_service import check_limit, record_usage, max_file_mb
 
 logger   = logging.getLogger(__name__)
 settings = get_settings()
 router   = APIRouter(prefix="/upload", tags=["File Upload"])
 
 ALLOWED_EXTENSIONS = {"csv": FileType.csv, "xlsx": FileType.xlsx, "pdf": FileType.pdf}
-MAX_FILE_SIZE_MB   = 50
+MAX_FILE_SIZE_MB   = 100        # hard server cap; each plan sets its own lower limit
 
 
 # ── Response Schemas ──────────────────────────────────────────────────────────
@@ -58,14 +60,10 @@ def ingest_file_to_chromadb(file_id: int, file_path: str, file_type: str, db_url
     Parses the file, chunks the text, embeds it, and stores in ChromaDB.
     Updates the file status in the database when done.
 
-    NOTE: This is a placeholder stub for Phase 1.
-          The full implementation is built in Phase 2 (rag_service.py).
     """
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-
-    engine = create_engine(db_url)
-    SessionLocal = sessionmaker(bind=engine)
+    # Reuse the app's connection pool (creating a new engine per upload leaked
+    # connections and ignored the driver fix in database.py).
+    from database import SessionLocal
     db = SessionLocal()
 
     try:
@@ -120,28 +118,37 @@ async def upload_file(
     Upload a CSV, XLSX, or PDF file.
     File is saved to disk immediately and ingestion runs in the background.
     """
-    # ── Validate extension ────────────────────────────────────────────────────
-    ext = file.filename.split(".")[-1].lower() if "." in file.filename else ""
+    # ── Validate name & extension ─────────────────────────────────────────────
+    # basename() blocks path tricks like "../../main.py"; odd characters are replaced
+    safe_name = os.path.basename((file.filename or "").replace("\\", "/")).strip()
+    safe_name = re.sub(r"[^\w.\- ()]", "_", safe_name) or "upload"
+    ext = safe_name.rsplit(".", 1)[-1].lower() if "." in safe_name else ""
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"File type '.{ext}' not supported. Use CSV, XLSX, or PDF.",
         )
 
+    # ── Plan limit (monthly uploads) ──────────────────────────────────────────
+    check_limit(db, current_user, "uploads")
+
     # ── Validate file size ────────────────────────────────────────────────────
     contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The file is empty.")
     size_mb  = len(contents) / (1024 * 1024)
-    if size_mb > MAX_FILE_SIZE_MB:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"File exceeds {MAX_FILE_SIZE_MB}MB limit.",
-        )
+    allowed_mb = max_file_mb(db, current_user, MAX_FILE_SIZE_MB)
+    if size_mb > allowed_mb:
+        detail = f"File exceeds {allowed_mb:g}MB limit."
+        if allowed_mb < MAX_FILE_SIZE_MB:
+            raise HTTPException(status_code=402, detail=f"{detail} Your plan allows files up to {allowed_mb:g}MB — upgrade for larger files.")
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=detail)
 
     # ── Save file to disk ─────────────────────────────────────────────────────
     user_upload_dir = os.path.join(settings.upload_dir, str(current_user.id))
     os.makedirs(user_upload_dir, exist_ok=True)
 
-    unique_name = f"{uuid.uuid4().hex}_{file.filename}"
+    unique_name = f"{uuid.uuid4().hex}_{safe_name}"
     file_path   = os.path.join(user_upload_dir, unique_name)
 
     with open(file_path, "wb") as f:
@@ -151,7 +158,7 @@ async def upload_file(
     file_record = UploadedFile(
         user_id       = current_user.id,
         filename      = unique_name,
-        original_name = file.filename,
+        original_name = safe_name,
         file_type     = ALLOWED_EXTENSIONS[ext],
         file_size     = len(contents),
         file_path     = file_path,
@@ -161,9 +168,10 @@ async def upload_file(
     db.add(file_record)
     db.commit()
     db.refresh(file_record)
+    record_usage(db, current_user, "uploads")
 
     log_event(
-        db, f"File uploaded: {file.filename} ({size_mb:.1f} MB)",
+        db, f"File uploaded: {safe_name} ({size_mb:.1f} MB)",
         LogLevel.info, current_user,
         metadata={"file_id": file_record.id, "file_type": ext},
     )
@@ -238,10 +246,12 @@ def delete_file(
     if not file_record:
         raise HTTPException(status_code=404, detail="File not found.")
 
-    # Remove from disk
+    # Remove from disk (plus any preprocessing undo snapshots)
     try:
         if os.path.exists(file_record.file_path):
             os.remove(file_record.file_path)
+        from services.preprocess_service import clear_history
+        clear_history(file_record.file_path)
     except Exception as e:
         logger.warning(f"Could not delete file from disk: {e}")
 

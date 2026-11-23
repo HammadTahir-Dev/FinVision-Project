@@ -18,7 +18,7 @@ const CustomTooltip = ({ active, payload, label }: any) => {
   return (
     <div style={{ background: "#0D1B3E", borderRadius: 10, padding: "12px 16px", color: "#fff", fontSize: "0.78rem", boxShadow: "0 8px 24px rgba(0,0,0,0.25)", minWidth: 180 }}>
       <p style={{ fontWeight: 700, marginBottom: 8, color: "#F59E0B" }}>{label}</p>
-      {payload.filter((p: any) => p.value != null).map((p: any) => (
+      {payload.filter((p: any) => p.value != null && !(payload.some((q: any) => q.name === "Actual" && q.value != null) && p.name !== "Actual")).map((p: any) => (
         <div key={p.name} style={{ display: "flex", justifyContent: "space-between", gap: 16, margin: "3px 0" }}>
           <span style={{ color: "rgba(255,255,255,0.65)", display: "flex", alignItems: "center", gap: 5 }}>
             <span style={{ width: 8, height: 8, borderRadius: "50%", background: p.color, display: "inline-block" }} />
@@ -32,9 +32,10 @@ const CustomTooltip = ({ active, payload, label }: any) => {
 };
 
 function formatNumber(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000)     return `${(n / 1_000).toFixed(1)}K`;
-  return n.toLocaleString();
+  const a = Math.abs(n);
+  if (a >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (a >= 1_000)     return `${(n / 1_000).toFixed(1)}K`;
+  return Number(n.toFixed(2)).toLocaleString();
 }
 
 // ── Main Component ────────────────────────────────────────────────────────────
@@ -69,24 +70,30 @@ export function Forecast() {
     })();
   }, []);
 
-  // Load file metadata when file selection changes
-  useEffect(() => {
-    if (!selectedFile) return;
-    (async () => {
-      try {
-        setLoadingMeta(true);
-        setMetrics([]); setSheets([]); setSelectedMetric(""); setSelectedSheet("");
-        const meta = await getFileMeta(selectedFile);
+  // Load sheets + metrics when the file changes, and metrics again when the
+  // sheet changes (previously the metric list always came from the first sheet)
+  async function loadMeta(fileId: number, sheetName?: string) {
+    try {
+      setLoadingMeta(true); setError(null);
+      setMetrics([]); setSelectedMetric("");
+      if (!sheetName) { setSheets([]); setSelectedSheet(""); }
+      const meta = await getFileMeta(fileId, sheetName);
+      if (!sheetName) {
         setSheets(meta.sheets);
-        setMetrics(meta.metrics);
-        if (meta.sheets.length > 0)  setSelectedSheet(meta.sheets[0]);
-        if (meta.metrics.length > 0) setSelectedMetric(meta.metrics[0]);
-      } catch (e: any) {
-        setError(e.message);
-      } finally {
-        setLoadingMeta(false);
+        if (meta.sheets.length > 0) setSelectedSheet(meta.sheets[0]);
       }
-    })();
+      setMetrics(meta.metrics);
+      if (meta.metrics.length > 0) setSelectedMetric(meta.metrics[0]);
+      else setError("No numeric columns found to forecast in this " + (sheetName ? "sheet." : "file."));
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setLoadingMeta(false);
+    }
+  }
+
+  useEffect(() => {
+    if (selectedFile) { setForecast(null); loadMeta(selectedFile); }
   }, [selectedFile]);
 
   const handleGenerate = async () => {
@@ -96,7 +103,8 @@ export function Forecast() {
     }
     setLoading(true); setError(null); setForecast(null);
     try {
-      const result = await generateForecast(selectedFile, selectedMetric, horizon, selectedSheet || undefined);
+      const sheetArg = sheets.length > 1 ? selectedSheet : undefined;   // CSV meta reports a dummy "Sheet1"
+      const result = await generateForecast(selectedFile, selectedMetric, horizon, sheetArg || undefined);
       setForecast(result);
     } catch (e: any) {
       setError(e.message || "Forecast generation failed.");
@@ -106,20 +114,29 @@ export function Forecast() {
   };
 
   // Build chart data
-  const chartData = forecast?.chart_data.map((p: ForecastChartPoint) => ({
-    date:     p.date,
-    Actual:   p.actual,
-    Expected: p.expected,
-    Best:     p.best,
-    Worst:    p.worst,
-  })) || [];
+  const lastActualIdx = forecast ? forecast.chart_data.map(p => p.is_forecast).lastIndexOf(false) : -1;
+  const chartData = forecast?.chart_data.map((p: ForecastChartPoint, i: number) => {
+    // Start the forecast lines at the last actual point so there's no visual gap
+    const join = i === lastActualIdx && lastActualIdx < forecast.chart_data.length - 1;
+    return {
+      date:     p.date,
+      Actual:   p.actual,
+      Expected: join ? p.actual : p.expected,
+      Best:     join ? p.actual : p.best,
+      Worst:    join ? p.actual : p.worst,
+    };
+  }) || [];
 
-  const todayMarker = forecast?.chart_data.find(p => !p.is_forecast)?.date;
+  const historical  = forecast?.chart_data.filter(p => !p.is_forecast) ?? [];
+  const todayMarker = historical.length ? historical[historical.length - 1].date : undefined;
   const kpis        = forecast?.kpis;
 
-  const allValues = chartData.flatMap(d => [d.Actual, d.Expected, d.Best, d.Worst].filter(Boolean) as number[]);
-  const yMin = allValues.length > 0 ? Math.floor(Math.min(...allValues) * 0.92) : 0;
-  const yMax = allValues.length > 0 ? Math.ceil(Math.max(...allValues)  * 1.06) : 100;
+  const allValues = chartData.flatMap(d => [d.Actual, d.Expected, d.Best, d.Worst].filter(v => v !== null && v !== undefined) as number[]);
+  const lo = allValues.length ? Math.min(...allValues) : 0;
+  const hi = allValues.length ? Math.max(...allValues) : 100;
+  const pad = Math.max((hi - lo) * 0.08, Math.abs(hi) * 0.02, 1);
+  const yMin = Math.floor(lo >= 0 ? Math.max(0, lo - pad) : lo - pad);
+  const yMax = Math.ceil(hi + pad);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", gap: 16, minHeight: 0, fontFamily: "Inter, sans-serif" }}>
@@ -148,7 +165,7 @@ export function Forecast() {
         {sheets.length > 1 && (
           <div>
             <label style={{ fontSize: "0.68rem", fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.07em", display: "block", marginBottom: 7 }}>Sheet</label>
-            <select value={selectedSheet} onChange={e => setSelectedSheet(e.target.value)}
+            <select value={selectedSheet} onChange={e => { setSelectedSheet(e.target.value); setForecast(null); if (selectedFile) loadMeta(selectedFile, e.target.value); }}
               style={{ padding: "8px 12px", border: "1.5px solid #E2E8F0", borderRadius: 8, fontSize: "0.82rem", color: "#0D1B3E", outline: "none", cursor: "pointer" }}>
               {sheets.map(s => <option key={s} value={s}>{s}</option>)}
             </select>
@@ -281,7 +298,7 @@ export function Forecast() {
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={chartData} margin={{ top: 8, right: 12, bottom: 0, left: 4 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#F0F2F7" />
-                  <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#94A3B8" }} tickLine={false} axisLine={false} interval={Math.floor(chartData.length / 8)} />
+                  <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#94A3B8" }} tickLine={false} axisLine={false} interval={Math.max(0, Math.floor(chartData.length / 8))} />
                   <YAxis tick={{ fontSize: 10, fill: "#94A3B8" }} tickLine={false} axisLine={false} tickFormatter={v => formatNumber(v)} domain={[yMin, yMax]} width={64} />
                   <Tooltip content={<CustomTooltip />} />
                   {todayMarker && (

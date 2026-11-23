@@ -51,18 +51,35 @@ async function apiFetch(
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw new Error(data.detail || `Request failed: ${response.status}`);
+    const message = typeof data.detail === "string" ? data.detail : `Request failed: ${response.status}`;
+    // 402 = plan limit reached → the dashboard shows an "Upgrade" prompt
+    if (response.status === 402) {
+      window.dispatchEvent(new CustomEvent(PLAN_LIMIT_EVENT, { detail: message }));
+    }
+    const err = new Error(message) as Error & { status?: number };
+    err.status = response.status;
+    throw err;
   }
 
   return data;
 }
+
+export const PLAN_LIMIT_EVENT = "finvision:plan-limit";
 
 async function apiDownload(path: string, filename: string) {
   const token = getToken();
   const response = await fetch(`${BASE_URL}${path}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-  if (!response.ok) throw new Error("Download failed");
+  if (response.status === 401) {
+    clearToken();
+    window.location.href = "/";
+    return;
+  }
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.detail || "Download failed");
+  }
   const blob = await response.blob();
   const url  = window.URL.createObjectURL(blob);
   const a    = document.createElement("a");
@@ -209,12 +226,23 @@ export interface Citation {
   relevance: number;
 }
 
+export interface ChartSpec {
+  type:    "line" | "bar" | "area" | "pie";
+  title:   string;
+  x_label: string;
+  y_label: string;
+  series:  { key: string; name: string }[];
+  data:    ({ label: string } & Record<string, number | string | null>)[];
+}
+
 export interface QueryResponse {
   session_id:  number;
   message_id:  number;
   answer:      string;
   citations:   Citation[];
   latency_ms:  number;
+  chart?:      ChartSpec | null;
+  audience?:   "plain" | "general" | "expert" | null;
 }
 
 export interface ChatMessage {
@@ -222,6 +250,7 @@ export interface ChatMessage {
   role:       "user" | "assistant";
   content:    string;
   citations:  Citation[] | null;
+  chart?:     ChartSpec | null;
   latency_ms: number | null;
   created_at: string;
 }
@@ -241,8 +270,23 @@ export async function sendQuery(
   });
 }
 
-export async function listSessions(): Promise<any[]> {
-  return apiFetch("/chat/sessions");
+export interface ChatSessionSummary {
+  id:            number;
+  title:         string;
+  created_at:    string | null;
+  updated_at:    string | null;
+  last_activity: string | null;
+  message_count: number;
+  preview:       string | null;
+}
+
+export async function listSessions(search?: string): Promise<ChatSessionSummary[]> {
+  const q = search && search.trim() ? `?q=${encodeURIComponent(search.trim())}` : "";
+  return apiFetch(`/chat/sessions${q}`);
+}
+
+export async function renameSession(sessionId: number, title: string): Promise<ChatSessionSummary> {
+  return apiFetch(`/chat/sessions/${sessionId}`, { method: "PATCH", body: JSON.stringify({ title }) });
 }
 
 export async function getMessages(sessionId: number): Promise<ChatMessage[]> {
@@ -253,14 +297,84 @@ export async function deleteSession(sessionId: number): Promise<void> {
   return apiFetch(`/chat/sessions/${sessionId}`, { method: "DELETE" });
 }
 
+// ── Preprocessing ─────────────────────────────────────────────────────────────
+
+export interface DataProfile {
+  rows:            number;
+  columns:         number;
+  total_nulls:     number;
+  nulls_by_column: Record<string, number>;
+  duplicate_rows:  number;
+  dtypes:          Record<string, "number" | "date" | "text">;
+}
+
+export interface TablePreview {
+  columns: string[];
+  rows:    (string | number | boolean | null)[][];
+}
+
+export interface PreprocessStep {
+  operation:   string;
+  description: string;
+  affected:    number;
+  command:     string;
+}
+
+export interface PreprocessResult {
+  success:       boolean;
+  error?:        string;
+  changed?:      boolean;
+  parsed_by?:    "rules" | "ai";
+  operation?:    string;
+  description?:  string;
+  steps?:        PreprocessStep[];
+  sheet?:        string | null;
+  sheets?:       string[];
+  before_shape?: [number, number];
+  after_shape?:  [number, number];
+  before_nulls?: number;
+  after_nulls?:  number;
+  profile?:      DataProfile;
+  preview?:      TablePreview;
+  can_undo?:     boolean;
+  file_size?:    number;
+}
+
+export interface FileSnapshot {
+  sheet:    string | null;
+  sheets:   string[];
+  profile:  DataProfile;
+  preview:  TablePreview;
+  can_undo: boolean;
+}
+
 export async function preprocessFile(
   fileId: number,
-  command: string
-): Promise<any> {
+  command: string,
+  sheetName?: string | null
+): Promise<PreprocessResult> {
   return apiFetch("/chat/preprocess", {
     method: "POST",
-    body: JSON.stringify({ file_id: fileId, command }),
+    body: JSON.stringify({ file_id: fileId, command, sheet_name: sheetName || null }),
   });
+}
+
+function sheetQuery(sheetName?: string | null) {
+  return sheetName ? `?sheet_name=${encodeURIComponent(sheetName)}` : "";
+}
+
+export async function getPreprocessPreview(fileId: number, sheetName?: string | null): Promise<FileSnapshot> {
+  return apiFetch(`/chat/preprocess/${fileId}/preview${sheetQuery(sheetName)}`);
+}
+
+export async function undoPreprocess(fileId: number, sheetName?: string | null): Promise<FileSnapshot & { success: boolean }> {
+  return apiFetch(`/chat/preprocess/${fileId}/undo${sheetQuery(sheetName)}`, { method: "POST" });
+}
+
+export async function downloadPreprocessed(fileId: number, originalName: string) {
+  const dot  = originalName.lastIndexOf(".");
+  const name = dot > 0 ? `${originalName.slice(0, dot)}_cleaned${originalName.slice(dot)}` : `${originalName}_cleaned`;
+  return apiDownload(`/chat/preprocess/${fileId}/download`, name);
 }
 
 
@@ -302,7 +416,7 @@ export async function getFileMeta(
   fileId: number,
   sheetName?: string
 ): Promise<{ file_id: number; filename: string; sheets: string[]; metrics: string[] }> {
-  const params = sheetName ? `?sheet_name=${sheetName}` : "";
+  const params = sheetName ? `?sheet_name=${encodeURIComponent(sheetName)}` : "";
   return apiFetch(`/forecast/file/${fileId}/meta${params}`);
 }
 
@@ -442,4 +556,117 @@ export async function toggleUser(userId: number): Promise<any> {
 
 export async function getHealthCheck(): Promise<any> {
   return apiFetch("/health");
+}
+
+
+// ── Billing / Subscriptions ───────────────────────────────────────────────────
+
+export type LimitKey = "uploads" | "chat_queries" | "forecasts" | "reports" | "max_file_mb";
+
+export interface Plan {
+  id:            number;
+  code:          string;
+  name:          string;
+  tagline:       string | null;
+  price_monthly: number;
+  price_yearly:  number;
+  currency:      string;
+  limits:        Partial<Record<LimitKey, number>>;   // -1 = unlimited
+  features:      string[];
+  is_default:    boolean;
+  is_active:     boolean;
+  highlighted:   boolean;
+  sort_order:    number;
+  subscribers?:  number;
+}
+
+export interface BillingSummary {
+  plan: Plan;
+  subscription: {
+    billing_cycle:        "monthly" | "yearly";
+    status:               string;
+    current_period_start: string | null;
+    current_period_end:   string | null;
+    cancel_at_period_end: boolean;
+  };
+  usage:            Record<"uploads" | "chat_queries" | "forecasts" | "reports", { used: number; limit: number }>;
+  max_file_mb:      number | null;
+  resets_at:        string;
+  unlimited_role:   boolean;
+  payment_provider: string;
+}
+
+export interface Payment {
+  id:            number;
+  reference:     string;
+  plan_code:     string;
+  plan_name:     string;
+  billing_cycle: string;
+  amount:        number;
+  currency:      string;
+  status:        string;
+  provider:      string;
+  period_start:  string | null;
+  period_end:    string | null;
+  created_at:    string | null;
+}
+
+export const BILLING_CHANGED_EVENT = "finvision:billing-changed";
+
+export async function getPlans(): Promise<Plan[]> {
+  return apiFetch("/billing/plans");
+}
+
+export async function getBilling(): Promise<BillingSummary> {
+  return apiFetch("/billing/me");
+}
+
+export async function checkoutPlan(planCode: string, cycle: "monthly" | "yearly"): Promise<{ summary: BillingSummary; payment: Payment | null }> {
+  const r = await apiFetch("/billing/checkout", { method: "POST", body: JSON.stringify({ plan_code: planCode, billing_cycle: cycle }) });
+  window.dispatchEvent(new Event(BILLING_CHANGED_EVENT));
+  return r;
+}
+
+export async function cancelPlan(): Promise<BillingSummary> {
+  const r = await apiFetch("/billing/cancel", { method: "POST" });
+  window.dispatchEvent(new Event(BILLING_CHANGED_EVENT));
+  return r;
+}
+
+export async function resumePlan(): Promise<BillingSummary> {
+  const r = await apiFetch("/billing/resume", { method: "POST" });
+  window.dispatchEvent(new Event(BILLING_CHANGED_EVENT));
+  return r;
+}
+
+export async function getPayments(): Promise<Payment[]> {
+  return apiFetch("/billing/payments");
+}
+
+// Supervisor
+export async function adminGetPlans(): Promise<Plan[]> {
+  return apiFetch("/billing/admin/plans");
+}
+
+export async function adminUpdatePlan(id: number, patch: Partial<Plan>): Promise<Plan> {
+  return apiFetch(`/billing/admin/plans/${id}`, { method: "PUT", body: JSON.stringify(patch) });
+}
+
+export async function adminCreatePlan(plan: Partial<Plan> & { code: string; name: string }): Promise<Plan> {
+  return apiFetch("/billing/admin/plans", { method: "POST", body: JSON.stringify(plan) });
+}
+
+export async function adminBillingStats(): Promise<{
+  total_subscriptions: number; paying: number; mrr: Record<string, number>;
+  revenue_this_month: Record<string, number>; payment_provider: string;
+}> {
+  return apiFetch("/billing/admin/stats");
+}
+
+export function formatPrice(amount: number, currency: string): string {
+  try {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency, maximumFractionDigits: amount % 1 ? 2 : 0 }).format(amount);
+  } catch {
+    return `${currency} ${amount.toLocaleString()}`;
+  }
 }

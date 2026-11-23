@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from jose import JWTError, jwt
-from passlib.context import CryptContext
+import bcrypt
 from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel, EmailStr
 from typing import Optional
@@ -27,7 +27,9 @@ settings = get_settings()
 router   = APIRouter(prefix="/auth", tags=["Authentication"])
 
 # ── Password hashing ──────────────────────────────────────────────────────────
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# bcrypt is used directly: passlib 1.7.4 crashes with bcrypt >= 4.1/5.0
+# ("password cannot be longer than 72 bytes"). Hashes stay in the same $2b$
+# format, so accounts created with the old passlib code still log in.
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 
@@ -62,12 +64,20 @@ class UserResponse(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _pw_bytes(password: str) -> bytes:
+    # bcrypt only uses the first 72 bytes; newer bcrypt raises instead of truncating
+    return password.encode("utf-8")[:72]
+
+
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    return bcrypt.hashpw(_pw_bytes(password), bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+    try:
+        return bcrypt.checkpw(_pw_bytes(plain), hashed.encode("utf-8"))
+    except (ValueError, TypeError):
+        return False
 
 
 def create_access_token(data: dict) -> str:

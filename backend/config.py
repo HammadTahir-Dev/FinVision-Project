@@ -28,6 +28,10 @@ class Settings(BaseSettings):
 
     # ── File Storage ──────────────────────────────────────────────────────────
     upload_dir: str = "./uploads"
+
+    # Billing: "demo" activates plans without charging. Replace with a real
+    # gateway (Stripe, PayFast, JazzCash...) in services/billing_service.py.
+    payment_provider: str = "demo"
     chroma_dir: str = "./chroma_db"
 
     # ── LLM / RAG Settings (editable by Supervisor) ───────────────────────────

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { Upload, MessageSquare, TrendingUp, FileText, LogOut, Bell, Settings, Wand2 } from "lucide-react";
+import { Upload, MessageSquare, TrendingUp, FileText, LogOut, Bell, Settings, Wand2, CreditCard, AlertTriangle, X } from "lucide-react";
 import type { AuthUser } from "@/app/auth";
 import finvisionLogo from "@/imports/Gemini_Generated_Image_zcm87kzcm87kzcm8__1_-Photoroom.png";
 import { ImageWithFallback } from "@/app/components/figma/ImageWithFallback";
@@ -8,6 +8,7 @@ import { AnalyzeChat }    from "./AnalyzeChat";
 import { PreprocessData } from "./PreprocessData";
 import { Forecast }       from "./Forecast";
 import { MyReports }      from "./MyReports";
+import { Subscription }   from "./Subscription";
 import { NotificationsPanel } from "./NotificationsPanel";
 import { SettingsDrawer }     from "./settings/SettingsDrawer";
 import {
@@ -15,7 +16,7 @@ import {
   mapLogToNotification, FONT_SIZE_MAP, DENSITY_PAD_MAP,
   type AppSettings, type AppNotification,
 } from "./types";
-import { getSystemLogs } from "@/app/api";
+import { getSystemLogs, getBilling, PLAN_LIMIT_EVENT, BILLING_CHANGED_EVENT } from "@/app/api";
 
 const TABS = [
   { id:"upload",     label:"Upload Data",    Icon:Upload,        desc:"Source Management" },
@@ -24,6 +25,11 @@ const TABS = [
   { id:"forecast",   label:"Forecast",       Icon:TrendingUp,    desc:"Predictive Analytics" },
   { id:"reports",    label:"My Reports",     Icon:FileText,      desc:"Export Engine" },
 ];
+
+const ACCOUNT_TABS = [
+  { id:"billing",    label:"Plans & Billing", Icon:CreditCard,   desc:"Subscription & usage" },
+];
+const ALL_TABS = [...TABS, ...ACCOUNT_TABS];
 
 function useClickOutside(ref: React.RefObject<HTMLElement | null>, cb: () => void) {
   useEffect(() => {
@@ -41,8 +47,20 @@ export function AnalystDashboard({ onLogout, user }: Props) {
   const [showNotifications, setShowNoti]  = useState(false);
   const [showSettings, setShowSettings]   = useState(false);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [planName, setPlanName]           = useState<string | null>(null);
+  const [limitMsg, setLimitMsg]           = useState<string | null>(null);
   const notiRef = useRef<HTMLDivElement>(null);
   useClickOutside(notiRef, () => setShowNoti(false));
+
+  // Current plan badge + "limit reached" banner
+  useEffect(() => {
+    const refresh = () => getBilling().then(b => setPlanName(b.plan.name)).catch(() => {});
+    const onLimit = (e: Event) => { setLimitMsg((e as CustomEvent<string>).detail); refresh(); };
+    refresh();
+    window.addEventListener(PLAN_LIMIT_EVENT, onLimit);
+    window.addEventListener(BILLING_CHANGED_EVENT, refresh);
+    return () => { window.removeEventListener(PLAN_LIMIT_EVENT, onLimit); window.removeEventListener(BILLING_CHANGED_EVENT, refresh); };
+  }, []);
 
   // Load real notifications from system logs
   useEffect(() => {
@@ -70,13 +88,14 @@ export function AnalystDashboard({ onLogout, user }: Props) {
   const name     = settings.displayName;
   const ini      = initials(name);
   const accent   = settings.accentColor;
-  const tabInfo  = TABS.find(t => t.id === activeTab)!;
+  const tabInfo  = ALL_TABS.find(t => t.id === activeTab)!;
+  const openTab  = (id: string) => { setActiveTab(id); if (id === "billing") setLimitMsg(null); };
 
   return (
-    <div style={{ display:"grid", gridTemplateColumns:"220px 1fr", height:"100vh", background:"#F4F6FB", fontFamily:"Inter,sans-serif", fontSize:FONT_SIZE_MAP[settings.fontSize] }}>
+    <div style={{ display:"grid", gridTemplateColumns:"220px 1fr", gridTemplateRows:"100vh", height:"100vh", overflow:"hidden", background:"#F4F6FB", fontFamily:"Inter,sans-serif", fontSize:FONT_SIZE_MAP[settings.fontSize] }}>
 
       {/* Sidebar */}
-      <div style={{ background:"#0D1B3E", display:"flex", flexDirection:"column", height:"100vh", position:"sticky", top:0 }}>
+      <div style={{ background:"#0D1B3E", display:"flex", flexDirection:"column", height:"100vh", minHeight:0, overflow:"hidden" }}>
         <div style={{ padding:"20px 16px 16px", borderBottom:"1px solid rgba(255,255,255,0.08)" }}>
           <ImageWithFallback src={finvisionLogo} alt="FinVision" style={{ width:"100%", height:52, objectFit:"contain", objectPosition:"left center", display:"block" }}/>
         </div>
@@ -88,16 +107,26 @@ export function AnalystDashboard({ onLogout, user }: Props) {
             <div style={{ overflow:"hidden" }}>
               <p style={{ color:"#fff", fontWeight:600, fontSize:"0.83rem", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{name}</p>
               <p style={{ color:"rgba(255,255,255,0.45)", fontSize:"0.68rem" }}>{settings.jobTitle}</p>
+              {planName && (
+                <button onClick={() => openTab("billing")} title="Plans & Billing"
+                  style={{ marginTop:5, display:"inline-flex", alignItems:"center", gap:4, padding:"2px 8px", borderRadius:999, border:"1px solid rgba(245,158,11,0.35)", background:"rgba(245,158,11,0.12)", color:"#F59E0B", fontSize:"0.6rem", fontWeight:700, cursor:"pointer", fontFamily:"Inter,sans-serif" }}>
+                  {planName} plan{planName === "Free" ? " · Upgrade" : ""}
+                </button>
+              )}
             </div>
           </div>
         </div>
-        <nav style={{ flex:1, padding:"14px 12px" }}>
+        <nav className="fv-side-nav" style={{ flex:1, minHeight:0, overflowY:"auto", scrollbarWidth:"none", padding:"14px 12px" }}>
           <p style={{ color:"rgba(255,255,255,0.3)", fontSize:"0.62rem", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.1em", marginBottom:8, paddingLeft:8 }}>Workspace</p>
           <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
-            {TABS.map(tab => {
+            {ALL_TABS.map(tab => {
               const active = activeTab === tab.id;
               return (
-                <button key={tab.id} onClick={() => setActiveTab(tab.id)}
+                <React.Fragment key={tab.id}>
+                {tab.id === ACCOUNT_TABS[0].id && (
+                  <p style={{ color:"rgba(255,255,255,0.3)", fontSize:"0.62rem", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.1em", margin:"14px 0 6px", paddingLeft:8 }}>Account</p>
+                )}
+                <button onClick={() => openTab(tab.id)}
                   style={{ width:"100%", display:"flex", alignItems:"center", gap:12, padding:"10px 12px", borderRadius:9, border:"none", cursor:"pointer", textAlign:"left", transition:"all 0.15s", background:active?accent:"transparent", color:active?"#0D1B3E":"rgba(255,255,255,0.6)", fontFamily:"Inter,sans-serif" }}
                   onMouseEnter={e => { if (!active) e.currentTarget.style.background = "rgba(255,255,255,0.07)"; }}
                   onMouseLeave={e => { if (!active) e.currentTarget.style.background = "transparent"; }}>
@@ -107,6 +136,7 @@ export function AnalystDashboard({ onLogout, user }: Props) {
                     <p style={{ fontSize:"0.63rem", marginTop:2, opacity:0.7 }}>{tab.desc}</p>
                   </div>
                 </button>
+                </React.Fragment>
               );
             })}
           </div>
@@ -122,7 +152,7 @@ export function AnalystDashboard({ onLogout, user }: Props) {
       </div>
 
       {/* Main */}
-      <div style={{ display:"flex", flexDirection:"column", height:"100vh", overflow:"hidden" }}>
+      <div style={{ display:"flex", flexDirection:"column", height:"100vh", minHeight:0, minWidth:0, overflow:"hidden" }}>
         {/* Header */}
         <div style={{ background:"#fff", borderBottom:"1px solid #E8EAF0", padding:"0 28px", height:62, display:"flex", alignItems:"center", justifyContent:"space-between", flexShrink:0, position:"relative", zIndex:100 }}>
           <div>
@@ -162,14 +192,26 @@ export function AnalystDashboard({ onLogout, user }: Props) {
           </div>
         </div>
 
+        {/* Plan-limit banner */}
+        {limitMsg && activeTab !== "billing" && (
+          <div style={{ margin:"12px 28px 0", padding:"10px 14px", borderRadius:10, background:"#FFFBEB", border:"1px solid #FCD34D", display:"flex", alignItems:"center", gap:10, flexShrink:0 }}>
+            <AlertTriangle size={16} color="#B45309" style={{ flexShrink:0 }}/>
+            <p style={{ fontSize:"0.8rem", color:"#92400E", flex:1 }}>{limitMsg}</p>
+            <button onClick={() => openTab("billing")}
+              style={{ padding:"6px 12px", borderRadius:7, border:"none", background:"#0D1B3E", color:"#fff", fontSize:"0.75rem", fontWeight:700, cursor:"pointer", fontFamily:"Inter,sans-serif", whiteSpace:"nowrap" }}>View plans</button>
+            <button onClick={() => setLimitMsg(null)} style={{ background:"none", border:"none", cursor:"pointer", display:"flex" }}><X size={15} color="#92400E"/></button>
+          </div>
+        )}
+
         {/* Tab content */}
-        <div style={{ flex:1, padding:DENSITY_PAD_MAP[settings.density], overflow:"auto", scrollbarWidth:"none" }}>
-          <div style={{ height:"100%" }}>
+        <div style={{ flex:1, minHeight:0, padding:DENSITY_PAD_MAP[settings.density], overflow:"auto", scrollbarWidth:"none" }}>
+          <div style={{ height: activeTab === "billing" ? "auto" : "100%" }}>
             {activeTab === "upload"     && <UploadData/>}
             {activeTab === "preprocess" && <PreprocessData/>}
             {activeTab === "chat"       && <AnalyzeChat/>}
             {activeTab === "forecast"   && <Forecast/>}
             {activeTab === "reports"    && <MyReports/>}
+            {activeTab === "billing"    && <Subscription/>}
           </div>
         </div>
       </div>

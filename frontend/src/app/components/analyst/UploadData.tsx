@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Upload, FileText, FileSpreadsheet, File, CheckCircle, AlertCircle, Clock, Link2, Trash2, RefreshCw } from "lucide-react";
+import { Upload, FileText, FileSpreadsheet, File, CheckCircle, AlertCircle, Clock, Trash2, RefreshCw } from "lucide-react";
 import {
   uploadFile, listFiles, toggleFileActive, deleteFile, getFileStatus,
   type UploadedFile,
@@ -41,7 +41,6 @@ export function UploadData() {
   const [loading, setLoading]     = useState(true);
   const [uploading, setUploading] = useState(false);
   const [error, setError]         = useState<string | null>(null);
-  const [apiUrl, setApiUrl]       = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Load files on mount
@@ -58,6 +57,8 @@ export function UploadData() {
       const updated = await Promise.all(
         processing.map(f => getFileStatus(f.id).catch(() => f))
       );
+      updated.filter(u => u.status === "failed").forEach(u =>
+        setError(`${u.original_name} could not be indexed: ${u.error_msg ?? "unknown error"}`));
       setFiles(prev => prev.map(f => {
         const update = updated.find(u => u.id === f.id);
         return update || f;
@@ -80,18 +81,21 @@ export function UploadData() {
   }
 
   async function handleFileUpload(fileList: FileList | null) {
-    if (!fileList || fileList.length === 0) return;
+    if (!fileList || fileList.length === 0 || uploading) return;
     setUploading(true);
     setError(null);
 
+    const failed: string[] = [];
     for (const file of Array.from(fileList)) {
       try {
         const uploaded = await uploadFile(file);
         setFiles(prev => [uploaded, ...prev]);
       } catch (e: any) {
-        setError(`Failed to upload ${file.name}: ${e.message}`);
+        failed.push(`${file.name}: ${e.message}`);
       }
     }
+    if (failed.length) setError(`Upload failed — ${failed.join(" · ")}`);
+    if (inputRef.current) inputRef.current.value = "";   // allow re-selecting the same file
     setUploading(false);
   }
 
@@ -105,6 +109,8 @@ export function UploadData() {
   }
 
   async function handleDelete(fileId: number) {
+    const f = files.find(x => x.id === fileId);
+    if (!window.confirm(`Delete ${f?.original_name ?? "this file"}? This cannot be undone.`)) return;
     try {
       await deleteFile(fileId);
       setFiles(prev => prev.filter(f => f.id !== fileId));
@@ -139,7 +145,7 @@ export function UploadData() {
           onDragOver={e => { e.preventDefault(); setDragging(true); }}
           onDragLeave={() => setDragging(false)}
           onDrop={handleDrop}
-          onClick={() => inputRef.current?.click()}
+          onClick={() => { if (!uploading) inputRef.current?.click(); }}
           style={{
             border: `2px dashed ${dragging ? '#0D1B3E' : '#CBD5E1'}`,
             borderRadius: '12px',
@@ -148,7 +154,11 @@ export function UploadData() {
             textAlign: 'center',
             cursor: uploading ? 'not-allowed' : 'pointer',
             transition: 'all 0.2s',
-            flexShrink: 0,
+            flex: 1,
+            minHeight: 260,
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'center',
             opacity: uploading ? 0.7 : 1,
           }}>
           <input
@@ -170,7 +180,7 @@ export function UploadData() {
           <p style={{ color: '#0D1B3E', fontWeight: 600, fontSize: '0.95rem', marginBottom: '4px' }}>
             {uploading ? 'Uploading & indexing...' : 'Drop files here or click to browse'}
           </p>
-          <p style={{ color: '#5A6480', fontSize: '0.8rem' }}>Supports CSV, Excel (.xlsx), and PDF — up to 50MB each</p>
+          <p style={{ color: '#5A6480', fontSize: '0.8rem' }}>Supports CSV, Excel (.xlsx) and PDF · maximum file size depends on your plan</p>
           <div className="flex items-center justify-center gap-3 mt-4">
             {['CSV', 'XLSX', 'PDF'].map(ext => (
               <span key={ext} style={{ padding: '3px 10px', borderRadius: '6px', background: '#EEF0F5', color: '#0D1B3E', fontSize: '0.72rem', fontWeight: 600 }}>{ext}</span>
@@ -178,43 +188,6 @@ export function UploadData() {
           </div>
         </div>
 
-        {/* ERP / API Integration */}
-        <div style={{ background: '#fff', borderRadius: '12px', border: '1px solid #E8EAF0', padding: '20px' }}>
-          <div className="flex items-center gap-2 mb-4">
-            <Link2 size={16} color="#0D1B3E" />
-            <h3 style={{ color: '#0D1B3E', fontWeight: 600, fontSize: '0.9rem' }}>ERP Integration / External API</h3>
-          </div>
-          <div className="space-y-3">
-            <div>
-              <label style={{ fontSize: '0.78rem', color: '#5A6480', fontWeight: 500, display: 'block', marginBottom: '4px' }}>API Endpoint URL</label>
-              <input
-                value={apiUrl}
-                onChange={e => setApiUrl(e.target.value)}
-                placeholder="https://erp.company.com/api/v2/financials"
-                style={{ width: '100%', padding: '8px 12px', border: '1.5px solid #E8EAF0', borderRadius: '7px', fontSize: '0.82rem', color: '#0D1B3E', outline: 'none', boxSizing: 'border-box' }}
-                onFocus={e => e.target.style.borderColor = '#0D1B3E'}
-                onBlur={e => e.target.style.borderColor = '#E8EAF0'}
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label style={{ fontSize: '0.78rem', color: '#5A6480', fontWeight: 500, display: 'block', marginBottom: '4px' }}>Auth Type</label>
-                <select style={{ width: '100%', padding: '8px 12px', border: '1.5px solid #E8EAF0', borderRadius: '7px', fontSize: '0.82rem', color: '#0D1B3E', outline: 'none' }}>
-                  <option>Bearer Token</option><option>API Key</option><option>OAuth 2.0</option>
-                </select>
-              </div>
-              <div>
-                <label style={{ fontSize: '0.78rem', color: '#5A6480', fontWeight: 500, display: 'block', marginBottom: '4px' }}>Sync Interval</label>
-                <select style={{ width: '100%', padding: '8px 12px', border: '1.5px solid #E8EAF0', borderRadius: '7px', fontSize: '0.82rem', color: '#0D1B3E', outline: 'none' }}>
-                  <option>Every hour</option><option>Daily</option><option>Weekly</option>
-                </select>
-              </div>
-            </div>
-            <button style={{ padding: '8px 18px', background: '#0D1B3E', color: '#fff', border: 'none', borderRadius: '7px', fontSize: '0.82rem', fontWeight: 600, cursor: 'pointer' }}>
-              Connect Integration
-            </button>
-          </div>
-        </div>
       </div>
 
       {/* Right: File Table */}
@@ -270,7 +243,7 @@ export function UploadData() {
                 </span>
                 <span style={{ fontSize: '0.78rem', color: '#5A6480' }}>{formatSize(file.file_size)}</span>
                 <span style={{ fontSize: '0.78rem', color: '#5A6480' }}>{formatDate(file.uploaded_at)}</span>
-                <StatusBadge status={file.status} />
+                <span title={file.error_msg ?? ""}><StatusBadge status={file.status} /></span>
                 <button
                   onClick={() => handleDelete(file.id)}
                   style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#CBD5E1', padding: '4px', display: 'flex', alignItems: 'center' }}

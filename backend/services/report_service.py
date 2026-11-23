@@ -55,7 +55,6 @@ def generate_report_narrative(
     Generate a structured financial report using Groq API.
     Returns sections dict with Executive Summary, Analysis, Forecast, Recommendations.
     """
-    groq      = get_groq_client()
     llm_model = db_settings.get("llm_model", settings.default_llm_model)
 
     # Build context for the LLM
@@ -111,17 +110,18 @@ Rules:
 
 Generate the complete report now."""
 
-    response = groq.chat.completions.create(
-        model=llm_model,
-        messages=[
+    # Shared helper: handles reasoning models (gpt-oss) that otherwise return
+    # an empty reply, which crashed section parsing with None.
+    from services.rag_service import llm_complete
+    full_text = llm_complete(
+        [
             {"role": "system", "content": system_prompt},
             {"role": "user",   "content": user_prompt},
         ],
-        temperature=0.3,
-        max_tokens=2000,
+        llm_model, max_tokens=4000, temperature=0.3,
     )
-
-    full_text = response.choices[0].message.content
+    if not full_text:
+        raise ValueError("The AI model returned an empty report. Please try again.")
 
     # Parse sections
     sections = parse_report_sections(full_text)
@@ -160,6 +160,15 @@ def parse_report_sections(text: str) -> dict:
         sections[key.lower()] = text[start_idx:end_idx].strip()
 
     return sections
+
+
+def _pdf_text(text: str) -> str:
+    """Escape for ReportLab and keep **bold** from the LLM's markdown."""
+    from xml.sax.saxutils import escape
+    import re as _re
+    t = escape(text)
+    t = _re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", t)
+    return t.replace("**", "").lstrip("#").strip()
 
 
 # ── PDF Export ────────────────────────────────────────────────────────────────
@@ -232,9 +241,9 @@ def export_pdf(
     # ── Cover ─────────────────────────────────────────────────────────────────
     story.append(Spacer(1, inch))
     story.append(Paragraph("FinVision", title_style))
-    story.append(Paragraph(f"{sections.get('report_type', 'Financial')} Report", subtitle_style))
-    story.append(Paragraph(sections.get("company_name", "Company"), subtitle_style))
-    story.append(Paragraph(f"Period: {sections.get('period', '')}", subtitle_style))
+    story.append(Paragraph(f"{_pdf_text(sections.get('report_type', 'Financial'))} Report", subtitle_style))
+    story.append(Paragraph(_pdf_text(sections.get("company_name", "Company")), subtitle_style))
+    story.append(Paragraph(f"Period: {_pdf_text(sections.get('period', ''))}", subtitle_style))
     story.append(Paragraph(f"Generated: {datetime.utcnow().strftime('%B %d, %Y')}", subtitle_style))
     story.append(Spacer(1, 0.3*inch))
     story.append(HRFlowable(width="100%", thickness=2, color=colors.HexColor("#4CAF50")))
@@ -265,10 +274,11 @@ def export_pdf(
             line = line.strip()
             if not line:
                 continue
+            # Escape &, <, > (e.g. "R&D", "<5%") — ReportLab treats text as markup
             if line.startswith("-") or line.startswith("•") or line[0].isdigit():
-                story.append(Paragraph(f"• {line.lstrip('-•0123456789. ')}", bullet_style))
+                story.append(Paragraph(f"• {_pdf_text(line.lstrip('-•*0123456789. '))}", bullet_style))
             else:
-                story.append(Paragraph(line, body_style))
+                story.append(Paragraph(_pdf_text(line), body_style))
 
         story.append(Spacer(1, 0.2*inch))
 
@@ -283,12 +293,12 @@ def export_pdf(
 
     doc.build(story)
 
-    # Count pages
-    from reportlab.pdfgen import canvas as cv
-    from PyPDF2 import PdfReader
+    # Count pages (PyPDF2 was imported here but is not a dependency, so every
+    # PDF export failed; PyMuPDF is already installed for PDF parsing)
     try:
-        reader     = PdfReader(output_path)
-        page_count = len(reader.pages)
+        import fitz
+        with fitz.open(output_path) as pdf:
+            page_count = pdf.page_count
     except Exception:
         page_count = 1
 

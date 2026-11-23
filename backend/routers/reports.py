@@ -26,6 +26,7 @@ from models.db_models import (
     User, UploadedFile, FileStatus,
     Report, ForecastResult, SystemLog, LogLevel,
 )
+from services.billing_service import check_limit, record_usage
 from routers.auth import get_current_user, log_event
 from services.report_service import generate_report
 
@@ -164,6 +165,8 @@ def create_report(
     db_settings = get_system_settings(db)
 
     # Generate report
+    check_limit(db, current_user, "reports")   # plan's monthly limit
+
     try:
         result = generate_report(
             user_id      = current_user.id,
@@ -195,6 +198,7 @@ def create_report(
     )
     db.add(report_record)
     db.commit()
+    record_usage(db, current_user, "reports")
     db.refresh(report_record)
 
     log_event(

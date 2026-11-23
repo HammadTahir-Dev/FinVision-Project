@@ -11,7 +11,9 @@ Responsibilities:
 """
 
 import logging
+import re
 import pandas as pd
+from services.file_utils import read_csv_any
 import numpy as np
 from prophet import Prophet
 from datetime import datetime
@@ -28,63 +30,102 @@ EXPENSE_KEYWORDS = ["expense", "cost", "expenditure", "spending", "outflow", "pa
 PROFIT_KEYWORDS  = ["profit", "net", "earning", "margin", "gain"]
 
 
+def _looks_like_years(series: pd.Series) -> bool:
+    s = pd.to_numeric(series, errors="coerce").dropna()
+    return len(s) > 0 and bool(((s >= 1900) & (s <= 2100) & (s == s.round())).all())
+
+
+def _to_dates(series: pd.Series) -> pd.Series:
+    """Parse a column to datetimes without turning plain numbers into 1970 timestamps."""
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return series
+    if pd.api.types.is_numeric_dtype(series):
+        if _looks_like_years(series):
+            return pd.to_datetime(series.astype("Int64").astype("string"), format="%Y", errors="coerce")
+        return pd.Series(pd.NaT, index=series.index)
+    text = series.astype("string").str.strip()
+    try:
+        return pd.to_datetime(text, errors="coerce", format="mixed")
+    except (TypeError, ValueError):
+        return pd.to_datetime(text, errors="coerce")
+
+
 def detect_date_column(df: pd.DataFrame) -> Optional[str]:
-    """Find the most likely date column."""
-    # First pass: check by keyword
+    """Find the most likely date column (numbers are never treated as dates, except year columns)."""
+    best, best_ratio = None, 0.0
     for column in df.columns:
-        if any(k in column.lower() for k in DATE_KEYWORDS):
-            try:
-                converted = pd.to_datetime(df[column])
-                if converted.notna().sum() > 0:
-                    return column
-            except Exception:
-                continue
-    # Second pass: try all columns
-    for column in df.columns:
-        try:
-            converted = pd.to_datetime(df[column])
-            if converted.notna().sum() > len(df) * 0.5:
-                return column
-        except Exception:
+        name = str(column).lower()
+        keyword = any(k in name for k in DATE_KEYWORDS)
+        if pd.api.types.is_numeric_dtype(df[column]) and not (keyword and _looks_like_years(df[column])):
             continue
-    return None
+        parsed = _to_dates(df[column])
+        ratio = parsed.notna().mean() if len(df) else 0
+        if keyword and ratio > 0.5:
+            return column
+        if ratio > 0.8 and ratio > best_ratio:
+            best, best_ratio = column, ratio
+    return best
 
 
 def detect_metric_column(df: pd.DataFrame, metric: str) -> Optional[str]:
     """Find the column matching the requested metric."""
-    metric_lower = metric.lower()
+    metric_lower = metric.lower().strip()
 
-    # Direct match first
+    # Direct match first (case-insensitive)
     for col in df.columns:
-        if col.lower() == metric_lower:
+        if str(col).lower().strip() == metric_lower:
             return col
 
     # Keyword match
     keywords_map = {
-        "revenue": REVENUE_KEYWORDS,
-        "expense": EXPENSE_KEYWORDS,
-        "profit":  PROFIT_KEYWORDS,
+        "revenue": REVENUE_KEYWORDS, "sales": REVENUE_KEYWORDS, "income": REVENUE_KEYWORDS,
+        "expense": EXPENSE_KEYWORDS, "expenses": EXPENSE_KEYWORDS, "cost": EXPENSE_KEYWORDS,
         "operational costs": EXPENSE_KEYWORDS,
-        "net profit": PROFIT_KEYWORDS,
+        "profit": PROFIT_KEYWORDS, "net profit": PROFIT_KEYWORDS,
     }
     keywords = keywords_map.get(metric_lower, [metric_lower])
 
     for col in df.columns:
-        col_lower = col.lower()
+        col_lower = str(col).lower()
         if any(k in col_lower for k in keywords):
-            if pd.api.types.is_numeric_dtype(df[date_col]):
+            if pd.api.types.is_numeric_dtype(df[col]):   # was df[date_col] → NameError
                 return col
 
     return None
 
 
+_EXCLUDE_TOKENS = {"id", "index", "row", "no", "number", "sr", "serial", "code", "zip", "phone", "year", "month", "day"}
+
+
 def get_available_metrics(df: pd.DataFrame) -> list[str]:
-    EXCLUDE = ["transaction_id", "id", "index", "row", "no", "number", "sr"]
-    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    return [c for c in numeric_cols if not any(ex in c.lower() for ex in EXCLUDE)]
+    """Numeric columns worth forecasting. Matches whole words, so 'Paid Amount',
+    'Growth' or 'Economic Index' are no longer hidden by 'id'/'row'/'no'."""
+    out = []
+    for c in df.select_dtypes(include=[np.number]).columns:
+        tokens = set(re.findall(r"[a-z]+", re.sub(r"([a-z])([A-Z])", r"\1 \2", str(c)).lower()))
+        if tokens & _EXCLUDE_TOKENS or str(c).lower().endswith("_id"):
+            continue
+        if df[c].notna().sum() == 0:
+            continue
+        out.append(str(c))
+    return out
 
 
 # ── Data Loading ──────────────────────────────────────────────────────────────
+
+def _read_frame(file_path: str, file_type: str, sheet_name: Optional[str] = None) -> pd.DataFrame:
+    if file_type == "csv":
+        df = read_csv_any(file_path)
+    elif file_type == "xlsx":
+        xl = pd.ExcelFile(file_path)
+        if sheet_name and sheet_name not in xl.sheet_names:
+            raise ValueError(f"Sheet '{sheet_name}' not found. Sheets: {xl.sheet_names}")
+        df = pd.read_excel(file_path, sheet_name=sheet_name or xl.sheet_names[0])
+    else:
+        raise ValueError(f"Unsupported file type: {file_type}")
+    df.columns = [str(c) for c in df.columns]
+    return df
+
 
 def load_financial_data(
     file_path: str,
@@ -95,57 +136,39 @@ def load_financial_data(
     """
     Load financial data from CSV or XLSX.
     Returns: (prepared_df, date_col, metric_col)
-    prepared_df has columns: ds (date), y (metric value)
+    prepared_df has columns: ds (month start), y (metric value)
     """
-    # Load file
-    if file_type == "csv":
-        df = pd.read_csv(file_path)
-    elif file_type == "xlsx":
-        if sheet_name:
-            df = pd.read_excel(file_path, sheet_name=sheet_name)
-        else:
-            # Load first sheet by default
-            xl = pd.ExcelFile(file_path)
-            df = pd.read_excel(file_path, sheet_name=xl.sheet_names[0])
-    else:
-        raise ValueError(f"Unsupported file type: {file_type}")
+    df = _read_frame(file_path, file_type, sheet_name)
+    # NOTE: no df.fillna(0) here — that turned missing dates into 1970-01-01 and
+    # missing values into fake zero months, which dragged forecasts down.
 
-    df = df.fillna(0)
-
-    # Detect columns
     date_col   = detect_date_column(df)
     metric_col = detect_metric_column(df, metric)
 
     if not date_col:
         raise ValueError(
-            f"No date column found. Make sure your file has a column with dates. "
-            f"Found columns: {df.columns.tolist()}"
+            "No date column found. Make sure your file has a column with dates "
+            f"(e.g. 'Date' or 'Month'). Found columns: {df.columns.tolist()}"
         )
-
     if not metric_col:
-        available = get_available_metrics(df)
         raise ValueError(
             f"No column matching '{metric}' found. "
-            f"Available numeric columns: {available}"
+            f"Available numeric columns: {get_available_metrics(df)}"
         )
 
     logger.info(f"Detected date column: '{date_col}', metric column: '{metric_col}'")
 
-    # Prepare Prophet dataframe
-    prophet_df = pd.DataFrame()
-    prophet_df["ds"] = pd.to_datetime(df[date_col])
-    prophet_df["y"]  = pd.to_numeric(df[metric_col], errors="coerce").fillna(0)
+    prophet_df = pd.DataFrame({
+        "ds": _to_dates(df[date_col]),
+        "y":  pd.to_numeric(df[metric_col], errors="coerce"),
+    }).dropna(subset=["ds", "y"])
 
-    # Remove rows with invalid dates
-    prophet_df = prophet_df.dropna(subset=["ds"])
-    prophet_df = prophet_df.sort_values("ds").reset_index(drop=True)
+    if prophet_df.empty:
+        raise ValueError(f"No rows have both a valid date in '{date_col}' and a number in '{metric_col}'.")
 
-    prophet_df["ds"] = prophet_df["ds"].values.astype("datetime64[M]").astype("datetime64[ns]")
-    prophet_df = (
-    prophet_df.groupby("ds")["y"]
-    .sum()
-    .reset_index()
-)
+    # Monthly totals; months with no data are simply absent (not zero)
+    prophet_df["ds"] = prophet_df["ds"].dt.to_period("M").dt.to_timestamp()
+    prophet_df = prophet_df.groupby("ds", as_index=False)["y"].sum().sort_values("ds").reset_index(drop=True)
 
     logger.info(f"Data prepared: {len(prophet_df)} monthly records")
     return prophet_df, date_col, metric_col
@@ -161,11 +184,7 @@ def get_sheet_names(file_path: str, file_type: str) -> list[str]:
 
 def get_file_metrics(file_path: str, file_type: str, sheet_name: Optional[str] = None) -> list[str]:
     """Return available numeric columns from the file."""
-    if file_type == "csv":
-        df = pd.read_csv(file_path)
-    else:
-        df = pd.read_excel(file_path, sheet_name=sheet_name or 0)
-    return get_available_metrics(df)
+    return get_available_metrics(_read_frame(file_path, file_type, sheet_name))
 
 
 # ── Prophet Forecasting ───────────────────────────────────────────────────────
@@ -182,7 +201,7 @@ def run_forecast(
     if len(prophet_df) < 2:
         raise ValueError("Need at least 2 data points to forecast.")
 
-# Auto-disable yearly seasonality if less than 24 months of data
+    # Auto-disable yearly seasonality if less than 24 months of data
     has_2_years = len(prophet_df) >= 24
 
     model = Prophet(
@@ -198,10 +217,11 @@ def run_forecast(
     future = model.make_future_dataframe(periods=periods, freq="MS")
     forecast = model.predict(future)
 
-    # Ensure no negative values for revenue/expense metrics
-    forecast["yhat"]       = forecast["yhat"].clip(lower=0)
-    forecast["yhat_lower"] = forecast["yhat_lower"].clip(lower=0)
-    forecast["yhat_upper"] = forecast["yhat_upper"].clip(lower=0)
+    # Revenue/expense can't go below zero, but profit legitimately can:
+    # only clip when the history itself never went negative.
+    if prophet_df["y"].min() >= 0:
+        for col in ("yhat", "yhat_lower", "yhat_upper"):
+            forecast[col] = forecast[col].clip(lower=0)
 
     return forecast
 
@@ -226,13 +246,16 @@ def calculate_kpis(
     # Forecasted next period
     next_value = float(future_only["yhat"].iloc[0]) if len(future_only) > 0 else current_value
 
-    # Year over year growth
-    if len(hist_values) >= 12:
-        yoy_growth = ((hist_values[-1] - hist_values[-12]) / abs(hist_values[-12])) * 100
+    # Year over year growth: latest month vs the same month a year earlier
+    # (index -13, the old code used -12 = only 11 months back). Guard against
+    # a zero base, which produced inf → JSON error → HTTP 500.
+    if len(hist_values) >= 13:
+        base = hist_values[-13]
     elif len(hist_values) >= 2:
-        yoy_growth = ((hist_values[-1] - hist_values[0]) / abs(hist_values[0])) * 100
+        base = hist_values[0]
     else:
-        yoy_growth = 0.0
+        base = None
+    yoy_growth = float((hist_values[-1] - base) / abs(base) * 100) if base else 0.0
 
     # Forecast period totals
     forecast_total    = float(future_only["yhat"].sum())
@@ -242,17 +265,20 @@ def calculate_kpis(
     # Confidence score (based on interval width)
     avg_interval = float((future_only["yhat_upper"] - future_only["yhat_lower"]).mean())
     avg_value    = float(future_only["yhat"].mean())
-    confidence   = max(0, min(100, 100 - (avg_interval / (avg_value + 1)) * 100)) if avg_value > 0 else 50
+    if not np.isfinite(avg_interval) or not np.isfinite(avg_value) or avg_value <= 0:
+        confidence = 50.0
+    else:
+        confidence = max(0.0, min(100.0, 100 - (avg_interval / (avg_value + 1)) * 100))
 
     return {
         "metric":          metric,
         "current_value":   round(current_value, 2),
         "next_period":     round(next_value, 2),
-        "yoy_growth_pct":  round(yoy_growth, 2),
+        "yoy_growth_pct":  round(float(yoy_growth), 2),
         "forecast_total":  round(forecast_total, 2),
         "forecast_best":   round(forecast_best, 2),
         "forecast_worst":  round(forecast_worst, 2),
-        "confidence_pct":  round(confidence, 1),
+        "confidence_pct":  round(float(confidence), 1),
         "data_points":     len(hist_values),
     }
 

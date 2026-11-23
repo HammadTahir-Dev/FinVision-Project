@@ -18,8 +18,27 @@ settings = get_settings()
 # ── Engine ────────────────────────────────────────────────────────────────────
 # pool_pre_ping=True checks connection health before using from pool
 # This prevents "connection closed" errors after idle periods
+def _normalize_db_url(url: str) -> str:
+    """
+    SQLAlchemy 2.1+ maps plain 'postgresql://' to the psycopg (v3) driver, but
+    requirements.txt installs psycopg2-binary. Pin the driver explicitly so the
+    app starts on both old and new SQLAlchemy versions.
+    """
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    if url.startswith("postgresql://"):
+        try:
+            import psycopg2  # noqa: F401
+            url = "postgresql+psycopg2://" + url[len("postgresql://"):]
+        except ImportError:
+            pass
+    return url
+
+
+DATABASE_URL = _normalize_db_url(settings.database_url)
+
 engine = create_engine(
-    settings.database_url,
+    DATABASE_URL,
     pool_pre_ping=True,
     pool_size=10,
     max_overflow=20,
@@ -81,3 +100,23 @@ def create_all_tables():
     except Exception as e:
         logger.error(f"❌ Failed to create database tables: {e}")
         raise
+
+
+def upgrade_schema():
+    """
+    Add columns introduced after the first release to existing databases.
+    (create_all() makes new tables but never adds columns to existing ones.)
+    Safe to run on every start.
+    """
+    from sqlalchemy import text, inspect
+    additions = {"chat_messages": {"chart": "JSON"}}
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table, cols in additions.items():
+            if not insp.has_table(table):
+                continue
+            existing = {c["name"] for c in insp.get_columns(table)}
+            for col, sqltype in cols.items():
+                if col not in existing:
+                    conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {col} {sqltype}'))
+                    logger.info(f"Added column {table}.{col}")

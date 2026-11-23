@@ -21,6 +21,7 @@ from models.db_models import (
     User, UploadedFile, FileStatus,
     ForecastResult, SystemLog, LogLevel,
 )
+from services.billing_service import check_limit, record_usage
 from routers.auth import get_current_user, log_event
 from services.forecast_service import generate_forecast, get_sheet_names, get_file_metrics
 
@@ -153,6 +154,8 @@ def run_forecast(
         )
 
     # Run forecast
+    check_limit(db, current_user, "forecasts")   # plan's monthly limit
+
     try:
         result = generate_forecast(
             file_path  = file_record.file_path,
@@ -181,6 +184,7 @@ def run_forecast(
     )
     db.add(forecast_record)
     db.commit()
+    record_usage(db, current_user, "forecasts")
     db.refresh(forecast_record)
 
     log_event(

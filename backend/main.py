@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from config import get_settings
-from database import create_all_tables, check_db_connection
+from database import create_all_tables, check_db_connection, upgrade_schema
 
 # ── Import Routers ────────────────────────────────────────────────────────────
 from routers.auth       import router as auth_router
@@ -28,6 +28,7 @@ from routers.chat       import router as chat_router
 from routers.forecast   import router as forecast_router
 from routers.reports    import router as reports_router
 from routers.supervisor import router as supervisor_router
+from routers.billing    import router as billing_router
 
 # ── Logging Setup ─────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -56,6 +57,7 @@ async def lifespan(app: FastAPI):
     # Create database tables
     logger.info("🗄️  Initializing database tables...")
     create_all_tables()
+    upgrade_schema()
 
     # Check DB connection
     db_status = check_db_connection()
@@ -66,6 +68,16 @@ async def lifespan(app: FastAPI):
 
     # Seed default system settings if not present
     seed_system_settings()
+
+    # Seed subscription plans (only missing ones — supervisor edits are kept)
+    try:
+        from database import SessionLocal
+        from services.billing_service import seed_plans
+        _db = SessionLocal()
+        seed_plans(_db)
+        _db.close()
+    except Exception as e:
+        logger.warning(f"Could not seed subscription plans: {e}")
 
     # Preload embedding model so background re-indexing is fast
     try:
@@ -167,6 +179,7 @@ app.include_router(chat_router)
 app.include_router(forecast_router)
 app.include_router(reports_router)
 app.include_router(supervisor_router)
+app.include_router(billing_router)
 
 
 # ── Core Endpoints ────────────────────────────────────────────────────────────
